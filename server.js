@@ -9,6 +9,27 @@ const Inquiry = require('./models/Inquiry');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ── Cached MongoDB connection (serverless-safe) ────────────────────────────────
+const MONGO_URI = process.env.MONGODB_URI;
+
+async function connectDB() {
+  // Already connected
+  if (mongoose.connection.readyState === 1) return;
+  if (!MONGO_URI || MONGO_URI.includes('YOUR_')) {
+    throw new Error('MONGODB_URI environment variable is not configured on Vercel.');
+  }
+  try {
+    await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 10000, socketTimeoutMS: 30000 });
+    console.log('✅ Connected to MongoDB Atlas');
+  } catch (err) {
+    console.error('❌ MongoDB connection error:', err.message);
+    throw err; // Re-throw so routes return a real error message
+  }
+}
+
+// Kick off connection eagerly (warm starts reuse this)
+connectDB().catch(err => console.error('Startup DB connect failed:', err.message));
+
 // ── Email transporter ─────────────────────────────────────────────────────────
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -184,8 +205,12 @@ app.post('/api/inquiry', async (req, res) => {
     sendNotificationEmail(inquiry);
     res.json({ success: true, message: 'Inquiry submitted successfully! We will contact you within 24 hours.', data: inquiry });
   } catch (err) {
-    console.error('❌ Failed to save inquiry:', err.message);
-    res.status(500).json({ success: false, message: 'Something went wrong. Please call us at +91 77809 88600.' });
+    console.error('❌ Failed to save inquiry — full error:', err.name, err.message, err.reason || '');
+    res.status(500).json({
+      success: false,
+      message: 'Something went wrong. Please call us at +91 77809 88600.',
+      debug: err.message  // visible in API response for now — remove after fixing
+    });
   }
 });
 
@@ -271,29 +296,7 @@ app.delete('/api/admin/inquiries/:id', authAdmin, async (req, res) => {
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
 app.get('/{*splat}', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
-// ── Cached MongoDB connection (required for serverless) ───────────────────────
-const MONGO_URI = process.env.MONGODB_URI;
-let cachedDb = global._mongooseConnection;
-
-async function connectDB() {
-  if (cachedDb && mongoose.connection.readyState === 1) return cachedDb;
-  if (!MONGO_URI || MONGO_URI.includes('YOUR_')) {
-    console.log('⚠️  MONGODB_URI not set — running without database.');
-    return null;
-  }
-  try {
-    cachedDb = await mongoose.connect(MONGO_URI);
-    global._mongooseConnection = cachedDb;
-    console.log('✅ Connected to MongoDB Atlas');
-    return cachedDb;
-  } catch (err) {
-    console.error('❌ MongoDB connection failed:', err.message);
-    return null;
-  }
-}
-
-// Connect eagerly at module load (for non-serverless / warm starts)
-connectDB();
+// (connectDB is defined at the top of this file)
 
 // ── Start server locally (Vercel handles this in production) ──────────────────
 if (!process.env.VERCEL) {
