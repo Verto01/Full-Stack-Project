@@ -177,6 +177,7 @@ app.post('/api/inquiry', async (req, res) => {
   const { name, phone, email, service, message } = req.body;
   if (!name || !phone || !message) return res.status(400).json({ success: false, message: 'Name, phone and message are required.' });
   try {
+    await connectDB();
     const inquiry = await Inquiry.create({ name, phone, email, service, message });
     console.log('✅ New inquiry saved to DB:', { id: inquiry._id, name, phone, service });
     // Send email notification (non-blocking — don't wait for it)
@@ -228,6 +229,7 @@ app.post('/api/admin/login', (req, res) => {
 // Protected: Get all inquiries
 app.get('/api/inquiries', authAdmin, async (req, res) => {
   try {
+    await connectDB();
     const data = await Inquiry.find().sort({ createdAt: -1 });
     res.json({ success: true, count: data.length, data });
   } catch (err) {
@@ -238,6 +240,7 @@ app.get('/api/inquiries', authAdmin, async (req, res) => {
 // Protected: Update inquiry status
 app.patch('/api/admin/inquiries/:id', authAdmin, async (req, res) => {
   try {
+    await connectDB();
     const { status } = req.body;
     if (!['new', 'contacted', 'closed'].includes(status)) {
       return res.status(400).json({ success: false, message: 'Invalid status.' });
@@ -254,6 +257,7 @@ app.patch('/api/admin/inquiries/:id', authAdmin, async (req, res) => {
 // Protected: Delete inquiry
 app.delete('/api/admin/inquiries/:id', authAdmin, async (req, res) => {
   try {
+    await connectDB();
     const inquiry = await Inquiry.findByIdAndDelete(req.params.id);
     if (!inquiry) return res.status(404).json({ success: false, message: 'Inquiry not found.' });
     console.log(`🗑️  Inquiry ${inquiry._id} deleted`);
@@ -267,19 +271,29 @@ app.delete('/api/admin/inquiries/:id', authAdmin, async (req, res) => {
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
 app.get('/{*splat}', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
-// ── Connect to MongoDB ────────────────────────────────────────────────────────
+// ── Cached MongoDB connection (required for serverless) ───────────────────────
 const MONGO_URI = process.env.MONGODB_URI;
+let cachedDb = global._mongooseConnection;
 
-if (MONGO_URI && !MONGO_URI.includes('YOUR_')) {
-  mongoose.connect(MONGO_URI)
-    .then(() => console.log('✅ Connected to MongoDB Atlas'))
-    .catch(err => {
-      console.error('❌ MongoDB connection failed:', err.message);
-      console.log('⚠️  Running without database — inquiries will NOT be saved.');
-    });
-} else {
-  console.log('⚠️  MONGODB_URI not set — running without database.');
+async function connectDB() {
+  if (cachedDb && mongoose.connection.readyState === 1) return cachedDb;
+  if (!MONGO_URI || MONGO_URI.includes('YOUR_')) {
+    console.log('⚠️  MONGODB_URI not set — running without database.');
+    return null;
+  }
+  try {
+    cachedDb = await mongoose.connect(MONGO_URI);
+    global._mongooseConnection = cachedDb;
+    console.log('✅ Connected to MongoDB Atlas');
+    return cachedDb;
+  } catch (err) {
+    console.error('❌ MongoDB connection failed:', err.message);
+    return null;
+  }
 }
+
+// Connect eagerly at module load (for non-serverless / warm starts)
+connectDB();
 
 // ── Start server locally (Vercel handles this in production) ──────────────────
 if (!process.env.VERCEL) {
