@@ -267,22 +267,24 @@ app.delete('/api/admin/inquiries/:id', authAdmin, async (req, res) => {
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
 app.get('/{*splat}', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
-// ── Start server with MongoDB connection ──────────────────────────────────────
+// ── Connect to MongoDB ────────────────────────────────────────────────────────
 const MONGO_URI = process.env.MONGODB_URI;
 
 if (MONGO_URI && !MONGO_URI.includes('YOUR_')) {
   mongoose.connect(MONGO_URI)
-    .then(() => {
-      console.log('✅ Connected to MongoDB Atlas');
-      app.listen(PORT, () => console.log(`🏗️  R B Constructions server running on http://localhost:${PORT}`));
-    })
+    .then(() => console.log('✅ Connected to MongoDB Atlas'))
     .catch(err => {
       console.error('❌ MongoDB connection failed:', err.message);
-      console.log('⚠️  Starting server without database — inquiries will NOT be saved.');
-      app.listen(PORT, () => console.log(`🏗️  R B Constructions server running on http://localhost:${PORT} (NO DATABASE)`));
+      console.log('⚠️  Running without database — inquiries will NOT be saved.');
     });
 } else {
-  console.log('⚠️  MONGODB_URI not set in .env — starting without database.');
-  console.log('   Inquiries will only print to console and will NOT be saved.');
-  app.listen(PORT, () => console.log(`🏗️  R B Constructions server running on http://localhost:${PORT} (NO DATABASE)`));
+  console.log('⚠️  MONGODB_URI not set — running without database.');
 }
+
+// ── Start server locally (Vercel handles this in production) ──────────────────
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => console.log(`🏗️  R B Constructions server running on http://localhost:${PORT}`));
+}
+
+// ── Export for Vercel serverless ──────────────────────────────────────────────
+module.exports = app;
