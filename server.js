@@ -11,18 +11,36 @@ const PORT = process.env.PORT || 3000;
 
 // ── Cached MongoDB connection (serverless-safe) ────────────────────────────────
 const MONGO_URI = process.env.MONGODB_URI;
+let cachedConnection = null;
 
 async function connectDB() {
-  // Already connected
-  if (mongoose.connection.readyState === 1) return;
+  // Already connected — reuse
+  if (cachedConnection && mongoose.connection.readyState === 1) return cachedConnection;
+  // Currently connecting — wait for it
+  if (mongoose.connection.readyState === 2) {
+    await new Promise(resolve => {
+      mongoose.connection.once('connected', resolve);
+      mongoose.connection.once('error', resolve);
+    });
+    if (mongoose.connection.readyState === 1) return mongoose.connection;
+  }
   if (!MONGO_URI || MONGO_URI.includes('YOUR_')) {
     throw new Error('MONGODB_URI environment variable is not configured on Vercel.');
   }
   try {
-    await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 10000, socketTimeoutMS: 30000 });
+    cachedConnection = await mongoose.connect(MONGO_URI, {
+      serverSelectionTimeoutMS: 15000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10,
+      bufferCommands: true,       // buffer commands while connecting
+      retryReads: true,
+      retryWrites: true,
+    });
     console.log('✅ Connected to MongoDB Atlas');
+    return cachedConnection;
   } catch (err) {
     console.error('❌ MongoDB connection error:', err.message);
+    cachedConnection = null;
     throw err; // Re-throw so routes return a real error message
   }
 }
