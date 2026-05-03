@@ -1,16 +1,24 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '.env') });
+const fs = require('fs');
 const mongoose = require('mongoose');
 const nodemailer = require('nodemailer');
 const Inquiry = require('./models/Inquiry');
+
+// ── Load .env only if it exists (locally). On Vercel, env vars are injected. ──
+const envPath = path.join(__dirname, '.env');
+if (fs.existsSync(envPath)) {
+  require('dotenv').config({ path: envPath });
+  console.log('📄 Loaded .env file (local mode)');
+} else {
+  console.log('☁️  No .env file — using Vercel environment variables');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ── Cached MongoDB connection (serverless-safe) ────────────────────────────────
-const MONGO_URI = process.env.MONGODB_URI;
 let cachedConnection = null;
 
 async function connectDB() {
@@ -24,15 +32,17 @@ async function connectDB() {
     });
     if (mongoose.connection.readyState === 1) return mongoose.connection;
   }
-  if (!MONGO_URI || MONGO_URI.includes('YOUR_')) {
-    throw new Error('MONGODB_URI environment variable is not configured on Vercel.');
+  // Read URI fresh from process.env every time (critical for Vercel serverless)
+  const uri = process.env.MONGODB_URI;
+  if (!uri || uri.includes('YOUR_')) {
+    throw new Error('MONGODB_URI environment variable is not configured. Check Vercel dashboard.');
   }
   try {
-    cachedConnection = await mongoose.connect(MONGO_URI, {
+    cachedConnection = await mongoose.connect(uri, {
       serverSelectionTimeoutMS: 15000,
       socketTimeoutMS: 45000,
       maxPoolSize: 10,
-      bufferCommands: true,       // buffer commands while connecting
+      bufferCommands: true,
       retryReads: true,
       retryWrites: true,
     });
@@ -41,34 +51,46 @@ async function connectDB() {
   } catch (err) {
     console.error('❌ MongoDB connection error:', err.message);
     cachedConnection = null;
-    throw err; // Re-throw so routes return a real error message
+    throw err;
   }
 }
 
 // Kick off connection eagerly (warm starts reuse this)
 connectDB().catch(err => console.error('Startup DB connect failed:', err.message));
 
-// ── Email transporter ─────────────────────────────────────────────────────────
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
+// ── Email transporter (created fresh per-request for serverless compatibility) ─
+function createTransporter() {
+  const user = process.env.EMAIL_USER;
+  const pass = process.env.EMAIL_PASS;
+  if (!user || !pass) {
+    console.warn('⚠️  EMAIL_USER or EMAIL_PASS missing from environment');
+    return null;
   }
-});
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user, pass }
+  });
+}
 
-const NOTIFY_EMAILS = (process.env.NOTIFY_EMAILS || '').split(',').map(e => e.trim()).filter(Boolean);
+function getNotifyEmails() {
+  return (process.env.NOTIFY_EMAILS || '').split(',').map(e => e.trim()).filter(Boolean);
+}
 
 async function sendNotificationEmail(inquiry) {
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS || NOTIFY_EMAILS.length === 0) {
-    console.log('⚠️  Email not configured — skipping notification.');
+  const emailUser = process.env.EMAIL_USER;
+  const notifyEmails = getNotifyEmails();
+  const transporter = createTransporter();
+
+  if (!transporter || notifyEmails.length === 0) {
+    console.log('⚠️  Email not configured — skipping notification.',
+      { hasUser: !!emailUser, hasPass: !!process.env.EMAIL_PASS, notifyCount: notifyEmails.length });
     return;
   }
   try {
     // Email to business owners
     await transporter.sendMail({
-      from: `"R B Constructions" <${process.env.EMAIL_USER}>`,
-      to: NOTIFY_EMAILS.join(', '),
+      from: `"R B Constructions" <${emailUser}>`,
+      to: notifyEmails.join(', '),
       subject: `🏗️ New Inquiry: ${inquiry.service || 'General'} — ${inquiry.name}`,
       html: `
         <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border:1px solid #E0DDD5;border-radius:8px;overflow:hidden">
@@ -90,12 +112,12 @@ async function sendNotificationEmail(inquiry) {
           </div>
         </div>`
     });
-    console.log('📧 Notification email sent to:', NOTIFY_EMAILS.join(', '));
+    console.log('📧 Notification email sent to:', notifyEmails.join(', '));
 
     // Auto-reply to client (if they provided an email)
     if (inquiry.email) {
       await transporter.sendMail({
-        from: `"R B Constructions" <${process.env.EMAIL_USER}>`,
+        from: `"R B Constructions" <${emailUser}>`,
         to: inquiry.email,
         subject: 'Thank you for your inquiry — R B Constructions',
         html: `
@@ -219,15 +241,14 @@ app.post('/api/inquiry', async (req, res) => {
     await connectDB();
     const inquiry = await Inquiry.create({ name, phone, email, service, message });
     console.log('✅ New inquiry saved to DB:', { id: inquiry._id, name, phone, service });
-    // Send email notification (non-blocking — don't wait for it)
-    sendNotificationEmail(inquiry);
+    // Send email notification — await it so it completes before serverless freezes
+    await sendNotificationEmail(inquiry);
     res.json({ success: true, message: 'Inquiry submitted successfully! We will contact you within 24 hours.', data: inquiry });
   } catch (err) {
     console.error('❌ Failed to save inquiry — full error:', err.name, err.message, err.reason || '');
     res.status(500).json({
       success: false,
-      message: 'Something went wrong. Please call us at +91 77809 88600.',
-      debug: err.message  // visible in API response for now — remove after fixing
+      message: 'Something went wrong. Please call us at +91 77809 88600.'
     });
   }
 });
@@ -239,11 +260,29 @@ app.get('/api/stats', (req, res) => res.json({
   data: { projects: 150, clients: 80, experience: 12, vehicles: vehicles.length }
 }));
 
+// ── Health check endpoint (verify env vars on Vercel) ─────────────────────────
+app.get('/api/health', (req, res) => {
+  res.json({
+    success: true,
+    environment: process.env.VERCEL ? 'vercel' : 'local',
+    checks: {
+      MONGODB_URI: !!process.env.MONGODB_URI,
+      EMAIL_USER: !!process.env.EMAIL_USER,
+      EMAIL_PASS: !!process.env.EMAIL_PASS,
+      NOTIFY_EMAILS: !!process.env.NOTIFY_EMAILS,
+      ADMIN_PASSWORD: !!process.env.ADMIN_PASSWORD,
+    },
+    dbState: ['disconnected','connected','connecting','disconnecting'][mongoose.connection.readyState] || 'unknown',
+    timestamp: new Date().toISOString()
+  });
+});
+
 // ── Admin API Routes ──────────────────────────────────────────────────────────
-const ADMIN_PASSWORD = (process.env.ADMIN_PASSWORD || 'admin123').trim();
-console.log('⚙️  ADMIN_PASSWORD loaded from .env:', Boolean(ADMIN_PASSWORD));
-const ADMIN_TOKEN = Buffer.from(ADMIN_PASSWORD + ':' + Date.now()).toString('base64');
-let adminToken = ADMIN_TOKEN; // Simple token — regenerated on each server restart
+// Read admin password fresh from env (serverless-safe)
+function getAdminPassword() {
+  return (process.env.ADMIN_PASSWORD || 'admin123').trim();
+}
+let adminToken = Buffer.from(getAdminPassword() + ':' + Date.now()).toString('base64');
 
 function normalizeAdminPassword(value) {
   return String(value || '').trim().replace(/^["']|["']$/g, '');
@@ -257,7 +296,9 @@ function authAdmin(req, res, next) {
 
 app.post('/api/admin/login', (req, res) => {
   const password = normalizeAdminPassword(req.body?.password);
-  const expectedPassword = normalizeAdminPassword(ADMIN_PASSWORD);
+  const expectedPassword = normalizeAdminPassword(getAdminPassword());
+  // Regenerate token on each login (serverless may have stale token)
+  adminToken = Buffer.from(getAdminPassword() + ':' + Date.now()).toString('base64');
   if (password === expectedPassword) {
     res.json({ success: true, token: adminToken });
   } else {
