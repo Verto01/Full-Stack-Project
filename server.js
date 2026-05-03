@@ -261,7 +261,13 @@ app.get('/api/stats', (req, res) => res.json({
 }));
 
 // ── Health check endpoint (verify env vars on Vercel) ─────────────────────────
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
+  let dbError = null;
+  try {
+    await connectDB();
+  } catch (err) {
+    dbError = err.message;
+  }
   res.json({
     success: true,
     environment: process.env.VERCEL ? 'vercel' : 'local',
@@ -273,6 +279,7 @@ app.get('/api/health', (req, res) => {
       ADMIN_PASSWORD: !!process.env.ADMIN_PASSWORD,
     },
     dbState: ['disconnected','connected','connecting','disconnecting'][mongoose.connection.readyState] || 'unknown',
+    ...(dbError && { dbError }),
     timestamp: new Date().toISOString()
   });
 });
